@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# FullPageOS generation script
+# Helper script that runs in a Raspbian/others chroot to create the FullPageOS distro
+# Written by Guy Sheffer <guysoft at gmail dot com>
+# GPL V3
+########
+set -x
+set -e
+
+source /common.sh
+
+unpack /filesystem/home/pi /home/pi pi
+unpack /filesystem/boot /boot
+unpack /filesystem/root_init /
+
+apt-get update
+
+apt-get remove -y --purge scratch squeak-plugins-scratch squeak-vm wolfram-engine python-minecraftpi minecraft-pi sonic-pi oracle-java8-jdk bluej greenfoot libreoffice-common libreoffice-core freepats
+apt-get autoremove -y
+
+#apt-get tools
+apt-get -y --force-yes install python2.7 git screen checkinstall avahi-daemon libavahi-compat-libdnssd1 xterm
+
+if [ "$FULLPAGEOS_INCLUDE_CHROMIUM" == "yes" ]
+then
+    apt-get install -y --force-yes chromium-browser
+    sudo -u pi sed -i 's@%BROWSER_START_SCRIPT%@/home/pi/scripts/start_chromium_browser@g' /home/pi/scripts/run_onepageos
+fi
+
+apt-get install -y --force-yes xdotool
+apt-get install -y --force-yes vim x11vnc expect
+
+
+#Install web stack
+if [ "$FULLPAGEOS_INCLUDE_LIGHTTPD" == "yes" ]
+then
+    apt-get install -y lighttpd php-common php-cgi php
+    lighty-enable-mod fastcgi-php
+    #service lighttpd force-reload
+    chown -R www-data:www-data /var/www/html
+    chmod 775 /var/www/html
+    usermod -a -G www-data pi
+    systemctl enable clear_lighttpd_cache.service
+    pushd /var/www/html
+        #Put git clones in place
+        if [ "$FULLPAGEOS_INCLUDE_DASHBOARD" == "yes" ]
+        then
+        gitclone FULLPAGEOS_DASHBOARD_REPO FullPageDashboard
+            chown -R pi:pi FullPageDashboard
+            chown -R www-data:www-data FullPageDashboard
+            chmod 775 FullPageDashboard
+            pushd FullPageDashboard
+                sed -i "s@'INIT_URL_PATH', __DIR__ . '/init.txt'@'INIT_URL_PATH', '/boot/fullpagedashboard.txt'@g" config.php
+            popd
+        fi
+        #Set Welcome screen
+        if [ "$FULLPAGEOS_INCLUDE_WELCOME" == "yes" ]
+        then        
+            gitclone FULLPAGEOS_WELCOME_REPO welcome
+            chown -R www-data:www-data welcome
+        fi
+    popd
+    
+    echo "enabled" > /boot/check_for_httpd
+else
+    echo "disabled" > /boot/check_for_httpd
+fi
+
+
+#override timezone
+if [ "$FULLPAGEOS_OVERRIDE_TIMEZONE" != "default" ]
+then
+    echo "$FULLPAGEOS_OVERRIDE_TIMEZONE" > /etc/timezone
+    dpkg-reconfigure -f noninteractive tzdata
+fi
+
+#override locale
+if [ "$FULLPAGEOS_OVERRIDE_LOCALE" != "default" ]
+then
+    sed -i '/^#.* '"$FULLPAGEOS_OVERRIDE_LOCALE"' /s/^# //' /etc/locale.gen
+    locale-gen
+    update-locale LANG="$FULLPAGEOS_OVERRIDE_LOCALE"
+fi
+
+#override password
+if [ "$FULLPAGEOS_OVERRIDE_PASSWORD" != "default" ]
+then
+    echo "pi:$FULLPAGEOS_OVERRIDE_PASSWORD" | chpasswd
+fi
+
+# Set up x11vnc
+sudo -u pi /home/pi/scripts/setX11vncPass raspberry
+if [ ! -f /home/pi/.vnc/passwd ]; then
+  echo "/home/pi/.vnc/passwd was not created. Trying again."
+  sudo -u pi /home/pi/scripts/setX11vncPass raspberry
+  if [ ! -f /home/pi/.vnc/passwd ]; then
+    echo "/home/pi/.vnc/passwd was not created again. Giving up."
+    echo "Failed to set a VNC password. Aborting build."
+    exit 1
+  fi
+fi
+
+#echo "sudo -u pi startx /home/pi/scripts/run_onepageos &" >> /etc/rc.local
+#echo "(sleep 15 ; sudo -u pi /home/pi/scripts/fullscreen) &" >> /etc/rc.local
+
+#####################################################################
+### setup services
+
+echo "server time.nist.gov" >> /etc/ntp.conf
+echo "server ntp.ubuntu.com" >> /etc/ntp.conf
+
+rm -r /usr/sbin/policy-rc.d || true
+
+#cleanup
+apt-get clean
+apt-get autoremove -y
